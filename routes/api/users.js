@@ -7,7 +7,12 @@ const gravatar = require("gravatar");
 const multer = require("multer");
 const path = require("path");
 const jimp = require("jimp");
+const nodemailer = require("nodemailer");
+const { nanoid } = require("nanoid");
 
+function generateVerificationToken() {
+  return nanoid();
+}
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, "tmp");
@@ -41,7 +46,6 @@ const auth = (req, res, next) => {
 router.post("/signup", upload.single("avatar"), async (req, res, next) => {
   const { email, password } = req.body;
   const user = await User.findOne({ email, password });
-
   if (user) {
     res.json({
       status: "error",
@@ -58,17 +62,39 @@ router.post("/signup", upload.single("avatar"), async (req, res, next) => {
           r: "pg",
           d: "mm",
         });
-
-    const newUser = new User({ email, avatarURL });
+    const verificationToken = generateVerificationToken();
+    const newUser = new User({
+      email,
+      avatarURL,
+      verificationToken,
+      verify: false,
+    });
     newUser.setPassword(password);
+
     await newUser.save();
-    res.json({
-      status: "succress",
-      code: 201,
-      data: {
-        message: "Register complete!",
+    const transporter = nodemailer.createTransport({
+      service: "outlook",
+      secure: false,
+      auth: {
+        user: "szpnfaceit@outlook.com",
+        pass: "qwerty1234%",
       },
     });
+    const html = `<a href='http://localhost:3000/api/users/verify/${newUser.verificationToken}'>Confirm email</a>`;
+    const emailOptions = {
+      from: "szpnfaceit@outlook.com",
+      to: newUser.email,
+      subject: "Varify email",
+      html: html,
+    };
+
+    await transporter.sendMail(emailOptions, function (err, info) {
+      if (err) {
+        console.log(err);
+        return;
+      }
+    });
+    res.status(200).json({ message: "Verification email sent" });
   } catch (error) {
     next(error);
   }
@@ -85,6 +111,14 @@ router.post("/login", async (req, res, _) => {
       message: "User already exists!",
     });
   }
+
+  const isVerified = user.verify;
+
+  if (!isVerified) {
+    res.status(401).json({ message: "Email is not verified" });
+    return;
+  }
+
   const payload = {
     id: user._id,
   };
@@ -176,4 +210,86 @@ router.patch("/avatars", auth, upload.single("avatar"), async (req, res, _) => {
   }
 });
 
+router.get("/verify/:verificationToken", async (req, res, next) => {
+  try {
+    const user = await User.findOne({
+      verificationToken: req.params.verificationToken,
+    });
+
+    if (!user) {
+      return res.json({
+        status: "error",
+        code: 404,
+        data: {
+          message: "User not found",
+        },
+      });
+    }
+    user.verify = true;
+    user.verificationToken = "null";
+    await user.save();
+
+    return res.status(200).json({ message: "Verification successful" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+router.post("/verify", async (req, res, next) => {
+  try {
+    const email = req.email;
+    const user = await User.findOne({ email });
+    if (!email) {
+      return res.json({
+        status: error,
+        code: 400,
+        data: {
+          message: "missing required field email",
+        },
+      });
+    }
+    if (!user) {
+      return res.json({
+        status: error,
+        code: 404,
+        data: {
+          message: "User not found",
+        },
+      });
+    }
+
+    if (user.verify) {
+      return res.json({
+        status: error,
+        code: 400,
+        data: {
+          message: "Verification has already been passed",
+        },
+      });
+    }
+    const transporter = nodemailer.createTransport({
+      service: "outlook",
+      secure: false,
+      auth: {
+        user: "szpnfaceit@outlook.com",
+        pass: "qwerty1234%",
+      },
+    });
+    const html = `<p>Click on the link below to verify your account</p>
+    <a href='http://localhost:3000/api/users/verify/${user.verificationToken}'>VERIFY</a>`;
+    const emailOptions = {
+      from: "szpnfaceit@outlook.com",
+      to: email,
+      subject: "Veryfication",
+      text: "Mail verification link",
+      html: html,
+    };
+
+    await transporter.sendMail(emailOptions);
+    res.status(200).json({ message: "Verification email sent" });
+  } catch (err) {
+    return res.status(500).json({ message: "Server error" });
+  }
+});
 module.exports = router;
